@@ -4,38 +4,35 @@ A multi-threaded file storage server inspired by Dropbox.
 
 It is developed as part of Operating Systems Lab to demonstrate practical understanding of thread synchronization, producer–consumer architecture, and network programming in C.
 
-👥 Developers
+<br> 👥 Developers
 
-Huzaifa Saleem   - BSCS 23139 \
-
-Danish Javed Dar - BSCS 23187 \
-
-Abdullah Asim    - BSCS 23064 \ 
+Huzaifa Saleem   - BSCS 23139<br>
+Danish Javed Dar - BSCS 23187<br>
+Abdullah Asim    - BSCS 23064<br>
 
 
+<br>🛠️ Running: <br>
 
-🛠️ Running: \
 
+1=Clone the repository:<br>  
+      git clone <repository-url><br> 
+      cd dropbox_server<br>
 
-1=Clone the repository:  \
-      git clone <repository-url> \ 
-      cd dropbox_server  \
+<br>2=Build the server and test client:  <br>
+      make clean <br> 
+      make   
 
-        
-    
-\ 2=Build the server and test client: \ 
-    make clean  \
-    make       \
-
-  Start the Server: \
-    ./server 8080  \
+<br>3=Start the Server:  
+     <br> ./server 8080  <br>
     
 
-4= Run automated test on another terminal  \  
-    ./test_client 127.0.0.1 8080 test1   \
+<br>4= Run automated test on another terminal  <br>
+      ./test_client 127.0.0.1 8080 test1  <br>   
+      
 
-5=For interactive Testing  with live commands: \  
-    ./test_client 127.0.0.1 8080 interactive \
+<br>5=For interactive Testing  with live commands:  <br>
+      ./test_client 127.0.0.1 8080 interactive   
+      
 
 
 
