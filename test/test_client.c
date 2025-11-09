@@ -1,3 +1,4 @@
+// test/test_client.c
 #include "../include/common.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,287 +8,441 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/select.h>
+#include <ctype.h>
+#include <errno.h>
+#include <time.h>
+#include <stdarg.h>
 
-#define BUFFER_SIZE 1024
 
-// Connect to server
-int connect_to_server(const char *host, int port) {
-    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0) {
-        perror("Socket creation failed");
-        return -1;
-    }
-    
-    struct sockaddr_in serv_addr;
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_port = htons(port);
-    
-    if (inet_pton(AF_INET, host, &serv_addr.sin_addr) <= 0) {
-        printf("Invalid address/ Address not supported\n");
-        close(sockfd);
-        return -1;
-    }
-    
-    if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-        printf("Connection failed to %s:%d\n", host, port);
-        close(sockfd);
-        return -1;
-    }
-    
-    printf("Connected to server %s:%d\n", host, port);
-    return sockfd;
+// Colors & symbols
+#define GREEN   "\033[0;32m"
+#define RED     "\033[0;31m"
+#define YELLOW  "\033[1;33m"
+#define BLUE    "\033[0;34m"
+#define CYAN    "\033[0;36m"
+#define MAGENTA "\033[0;35m"
+#define RESET   "\033[0m"
+
+#define BUF_SIZ 8192
+
+// ------------------------- Helpers -------------------------
+static void print_divider() {
+    printf("%s------------------------------------------%s\n", CYAN, RESET);
 }
 
-// Helper function to send command and wait for response
-void send_and_wait(int sockfd, const char *command) {
-    char buffer[BUFFER_SIZE];
-    
-    // Send command
-    printf("Sending: %s", command);
-    if (send(sockfd, command, strlen(command), 0) < 0) {
-        printf("Failed to send command\n");
+static void log_info(const char *fmt, ...) {
+    va_list ap;
+    printf("%s[INFO] %s📣  ", BLUE, RESET);
+    va_start(ap, fmt);
+    vprintf(fmt, ap);
+    va_end(ap);
+    printf("\n");
+}
+
+static void log_action(const char *fmt, ...) {
+    va_list ap;
+    printf("%s[ACTION] %s⚙️  ", MAGENTA, RESET);
+    va_start(ap, fmt);
+    vprintf(fmt, ap);
+    va_end(ap);
+    printf("\n");
+}
+
+static void log_server_line(const char *line) {
+    // Filter ACK lines to reduce clutter
+    if (strncmp(line, "ACK:", 4) == 0) {
+        // skip printing ACK lines (internal queue ack)
         return;
     }
-    
-    // Wait for and read response
-    usleep(100000); // Small delay to ensure server processes the command
-    
-    fd_set read_fds;
-    FD_ZERO(&read_fds);
-    FD_SET(sockfd, &read_fds);
-    
-    struct timeval timeout;
-    timeout.tv_sec = 2;
-    timeout.tv_usec = 0;
-    
-    // Check if there's data to read
-    int ready = select(sockfd + 1, &read_fds, NULL, NULL, &timeout);
-    if (ready > 0) {
-        ssize_t bytes_received = recv(sockfd, buffer, sizeof(buffer) - 1, 0);
-        if (bytes_received > 0) {
-            buffer[bytes_received] = '\0';
-            printf("Server: %s", buffer);
+    // Print other server lines
+    printf("%s[SERVER]%s 📥 %s\n", YELLOW, RESET, line);
+}
+
+static void log_success(const char *fmt, ...) {
+    va_list ap;
+    printf("%s[SUCCESS] %s✅  ", GREEN, RESET);
+    va_start(ap, fmt);
+    vprintf(fmt, ap);
+    va_end(ap);
+    printf("\n");
+}
+
+static void log_error(const char *fmt, ...) {
+    va_list ap;
+    printf("%s[ERROR] %s❌  ", RED, RESET);
+    va_start(ap, fmt);
+    vprintf(fmt, ap);
+    va_end(ap);
+    printf("\n");
+}
+
+// Trim helpers
+static char *trim(char *s) {
+    if (!s) return s;
+    while (isspace((unsigned char)*s)) s++;
+    if (*s == 0) return s;
+    char *end = s + strlen(s) - 1;
+    while (end > s && isspace((unsigned char)*end)) end--;
+    end[1] = '\0';
+    return s;
+}
+
+// Receive available data with a short gathering window, return malloc'd buffer (or NULL)
+static char *recv_with_gather(int sockfd, int initial_timeout_ms) {
+    // Read with select. After first read, gather remaining with short timeout.
+    fd_set readfds;
+    struct timeval tv;
+    char *acc = NULL;
+    size_t acc_len = 0;
+
+    // initial wait
+    FD_ZERO(&readfds);
+    FD_SET(sockfd, &readfds);
+    tv.tv_sec = initial_timeout_ms / 1000;
+    tv.tv_usec = (initial_timeout_ms % 1000) * 1000;
+
+    int rv = select(sockfd + 1, &readfds, NULL, NULL, &tv);
+    if (rv <= 0) return NULL; // no data
+
+    // Now read while data available; after first read use short timeout to collect the rest
+    for (;;) {
+        char buf[BUF_SIZ];
+        ssize_t n = recv(sockfd, buf, sizeof(buf), 0);
+        if (n <= 0) break;
+
+        char *newacc = realloc(acc, acc_len + (size_t)n + 1);
+        if (!newacc) { free(acc); return NULL; }
+        acc = newacc;
+        memcpy(acc + acc_len, buf, (size_t)n);
+        acc_len += (size_t)n;
+        acc[acc_len] = '\0';
+
+        // short gather window
+        FD_ZERO(&readfds);
+        FD_SET(sockfd, &readfds);
+        tv.tv_sec = 0;
+        tv.tv_usec = 150000; // 150ms gather
+        rv = select(sockfd + 1, &readfds, NULL, NULL, &tv);
+        if (rv <= 0) break;
+    }
+
+    return acc;
+}
+
+// Process response buffer (may include multiple lines). Prints lines (except ACK).
+// Returns 1 if any line contained "TASK_COMPLETE: SUCCESS - " and returns pointer to the substring
+// after that prefix via out_result (malloc'd). Caller must free out_result.
+static int process_and_print_response(const char *buf, char **out_result) {
+    if (!buf) return 0;
+    *out_result = NULL;
+    int found_task_complete = 0;
+    const char *p = buf;
+    char line[BUF_SIZ];
+
+    while (*p) {
+        // read up to newline
+        const char *nl = strchr(p, '\n');
+        size_t len = nl ? (size_t)(nl - p) : strlen(p);
+        if (len >= sizeof(line)) len = sizeof(line) - 1;
+        memcpy(line, p, len);
+        line[len] = '\0';
+
+        char *t = trim(line);
+        if (t && *t) {
+            // print server line unless ACK
+            if (strncmp(t, "ACK:", 4) != 0) {
+                printf("%s[SERVER]%s 📥 %s\n", YELLOW, RESET, t);
+            }
+            // detect TASK_COMPLETE payload
+            const char *prefix = "TASK_COMPLETE: SUCCESS - ";
+            if (strncmp(t, prefix, strlen(prefix)) == 0) {
+                found_task_complete = 1;
+                const char *payload = t + strlen(prefix);
+                if (payload && *payload) {
+                    // save payload (may be multi-line in original buffer; we only get single-line fragments here)
+                    *out_result = strdup(payload);
+                } else {
+                    // maybe the file content comes in subsequent chunks of the original buffer; if so,
+                    // take everything after the prefix in the original buf
+                    const char *fullpos = strstr(buf, prefix);
+                    if (fullpos) {
+                        fullpos += strlen(prefix);
+                        *out_result = strdup(fullpos);
+                    }
+                }
+            }
         }
-    } else if (ready == 0) {
-        printf("No response from server (timeout)\n");
-    } else {
-        printf("Error waiting for response\n");
+
+        if (!nl) break;
+        p = nl + 1;
     }
+    return found_task_complete;
 }
 
-// Send command and receive response (simple version)
-void send_command(int sockfd, const char *command) {
-    char buffer[BUFFER_SIZE];
-    
-    // Send command
-    printf("Sending: %s", command);
-    send(sockfd, command, strlen(command), 0);
-    
-    // Receive response
-    ssize_t bytes_received = recv(sockfd, buffer, sizeof(buffer) - 1, 0);
-    if (bytes_received > 0) {
-        buffer[bytes_received] = '\0';
-        printf("Server: %s", buffer);
-    } else {
-        printf("No response from server\n");
-    }
+// ------------------------- Network -------------------------
+static int connect_to_server(const char *host, int port) {
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) { perror("socket"); return -1; }
+    struct sockaddr_in addr = {0};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    if (inet_pton(AF_INET, host, &addr.sin_addr) <= 0) { close(s); return -1; }
+    if (connect(s, (struct sockaddr*)&addr, sizeof(addr)) < 0) { close(s); return -1; }
+    printf("%s[CLIENT]%s 🌐 Connected to %s:%d\n", GREEN, RESET, host, port);
+    return s;
 }
 
-// Replace the test_scenario_1 function with this:
+// ------------------------- Test scenarios -------------------------
 void test_scenario_1(int sockfd) {
-    printf("\n=== Test Scenario 1: Basic User Operations ===\n");
-    
-    char buffer[BUFFER_SIZE];
-    
-    // Step 1: Wait for and respond to authentication prompt
-    printf("Waiting for authentication prompt...\n");
-    ssize_t bytes = recv(sockfd, buffer, sizeof(buffer) - 1, 0);
-    if (bytes > 0) {
-        buffer[bytes] = '\0';
-        printf("Server: %s", buffer);
-    }
-    
-    // Step 2: Send SIGNUP and wait for response
-    printf("Sending: SIGNUP user1 password123\n");
+    print_divider();
+    log_info("Test Scenario 1: Basic user flow (signup, list, upload, list)");
+    // Wait for auth prompt
+    char *resp = recv_with_gather(sockfd, 2000);
+    if (resp) { process_and_print_response(resp, &(char*){NULL}); free(resp); }
+
+    // Signup
+    log_action("Signing up user1");
     send(sockfd, "SIGNUP user1 password123\n", 25, 0);
-    
-    bytes = recv(sockfd, buffer, sizeof(buffer) - 1, 0);
-    if (bytes > 0) {
-        buffer[bytes] = '\0';
-        printf("Server: %s", buffer);
-    }
-    
-    // Step 3: Wait for welcome message
-    bytes = recv(sockfd, buffer, sizeof(buffer) - 1, 0);
-    if (bytes > 0) {
-        buffer[bytes] = '\0';
-        printf("Server: %s", buffer);
-    }
-    
-    // Step 4: LIST files (should be empty)
-    printf("Sending: LIST\n");
+    resp = recv_with_gather(sockfd, 1500);
+    if (resp) { process_and_print_response(resp, &(char*){NULL}); free(resp); }
+
+    // Wait for welcome (could be included)
+    // LIST
+    log_action("Listing files (should be empty)");
     send(sockfd, "LIST\n", 5, 0);
-    
-    bytes = recv(sockfd, buffer, sizeof(buffer) - 1, 0);
-    if (bytes > 0) {
-        buffer[bytes] = '\0';
-        printf("Server: %s", buffer);
+    resp = recv_with_gather(sockfd, 1500);
+    if (resp) { process_and_print_response(resp, &(char*){NULL}); free(resp); }
+
+    // Upload ../test.txt
+    log_action("Uploading ../test.txt");
+    FILE *f = fopen("../test.txt", "rb");
+    if (!f) {
+        log_error("Cannot open ../test.txt - create it in project root and retry");
+        return;
     }
-    
-    // Step 5: UPLOAD file
-    printf("Sending: UPLOAD test1.txt\n");
-    send(sockfd, "UPLOAD test1.txt\n", 17, 0);
-    
-    // Wait for READY prompt
-    bytes = recv(sockfd, buffer, sizeof(buffer) - 1, 0);
-    if (bytes > 0) {
-        buffer[bytes] = '\0';
-        printf("Server: %s", buffer);
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    rewind(f);
+    char *buf = malloc((size_t)sz);
+    fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+
+    send(sockfd, "UPLOAD test.txt\n", 16, 0);
+    // Wait for READY or ACK, but don't spam output; gather response
+    resp = recv_with_gather(sockfd, 1500);
+    if (resp) {
+        // print non-ACK lines
+        char *dummy = NULL;
+        process_and_print_response(resp, &dummy);
+        free(dummy);
+        free(resp);
     }
-    
-    // Send file content
-    printf("Sending file data...\n");
-    send(sockfd, "This is test file content for user1!\n", 36, 0);
-    
-    // Wait for upload completion
-    bytes = recv(sockfd, buffer, sizeof(buffer) - 1, 0);
-    if (bytes > 0) {
-        buffer[bytes] = '\0';
-        printf("Server: %s", buffer);
+
+    // Send file bytes
+    send(sockfd, buf, (size_t)sz, 0);
+    free(buf);
+
+    // Wait for task complete
+    resp = recv_with_gather(sockfd, 2500);
+    char *result_payload = NULL;
+    if (resp) {
+        int ok = process_and_print_response(resp, &result_payload);
+        if (ok && result_payload) {
+            // if server attached content for some reason, show it
+            printf("%s[PAYLOAD]%s %s\n", CYAN, RESET, result_payload);
+            free(result_payload);
+        }
+        free(resp);
     }
-    
-    // Step 6: LIST files again (should have test1.txt)
-    printf("Sending: LIST\n");
+
+    // LIST again
+    log_action("Listing files after upload");
     send(sockfd, "LIST\n", 5, 0);
-    
-    bytes = recv(sockfd, buffer, sizeof(buffer) - 1, 0);
-    if (bytes > 0) {
-        buffer[bytes] = '\0';
-        printf("Server: %s", buffer);
-    }
-    
-    printf("=== Test Scenario 1 Completed ===\n");
+    resp = recv_with_gather(sockfd, 1500);
+    if (resp) { process_and_print_response(resp, &(char*){NULL}); free(resp); }
+
+    log_success("Test Scenario 1 finished");
+    print_divider();
 }
 
-// Replace test_scenario_2 with this simpler version:
-void test_scenario_2() {
-    printf("\n=== Test Scenario 2: Multiple Users ===\n");
-    
-    // User 1 - Simple connection test only
-    printf("Testing User 1 connection...\n");
-    int sock1 = connect_to_server("127.0.0.1", 8080);
-    if (sock1 >= 0) {
-        char buffer[BUFFER_SIZE];
-        
-        // Wait for auth prompt and send SIGNUP
-        recv(sock1, buffer, sizeof(buffer) - 1, 0);
-        send(sock1, "SIGNUP user2 pass456\n", 21, 0);
-        recv(sock1, buffer, sizeof(buffer) - 1, 0); // SIGNUP response
-        recv(sock1, buffer, sizeof(buffer) - 1, 0); // Welcome message
-        
-        send(sock1, "LIST\n", 5, 0);
-        recv(sock1, buffer, sizeof(buffer) - 1, 0);
-        
-        close(sock1);
-        printf("User 1 test completed\n");
+void test_scenario_2(void) {
+    print_divider();
+    log_info("Test Scenario 2: Multi-user quick test");
+
+    int s1 = connect_to_server("127.0.0.1", 8080);
+    if (s1 >= 0) {
+        char *r = recv_with_gather(s1, 1500);
+        if (r) { process_and_print_response(r, &(char*){NULL}); free(r); }
+        send(s1, "SIGNUP user2 pass456\n", 21, 0);
+        r = recv_with_gather(s1, 1500);
+        if (r) { process_and_print_response(r, &(char*){NULL}); free(r); }
+        send(s1, "LIST\n", 5, 0);
+        r = recv_with_gather(s1, 1500);
+        if (r) { process_and_print_response(r, &(char*){NULL}); free(r); }
+        close(s1);
+        log_success("User2 scenario done");
     }
-    
-    // Small delay between users
+
     sleep(1);
-    
-    // User 2
-    printf("Testing User 2 connection...\n");
-    int sock2 = connect_to_server("127.0.0.1", 8080);
-    if (sock2 >= 0) {
-        char buffer[BUFFER_SIZE];
-        
-        // Wait for auth prompt and send SIGNUP
-        recv(sock2, buffer, sizeof(buffer) - 1, 0);
-        send(sock2, "SIGNUP user3 pass789\n", 21, 0);
-        recv(sock2, buffer, sizeof(buffer) - 1, 0); // SIGNUP response
-        recv(sock2, buffer, sizeof(buffer) - 1, 0); // Welcome message
-        
-        send(sock2, "LIST\n", 5, 0);
-        recv(sock2, buffer, sizeof(buffer) - 1, 0);
-        
-        close(sock2);
-        printf("User 2 test completed\n");
+
+    int s2 = connect_to_server("127.0.0.1", 8080);
+    if (s2 >= 0) {
+        char *r = recv_with_gather(s2, 1500);
+        if (r) { process_and_print_response(r, &(char*){NULL}); free(r); }
+        send(s2, "SIGNUP user3 pass789\n", 21, 0);
+        r = recv_with_gather(s2, 1500);
+        if (r) { process_and_print_response(r, &(char*){NULL}); free(r); }
+        send(s2, "LIST\n", 5, 0);
+        r = recv_with_gather(s2, 1500);
+        if (r) { process_and_print_response(r, &(char*){NULL}); free(r); }
+        close(s2);
+        log_success("User3 scenario done");
     }
-    
-    printf("=== Test Scenario 2 Completed ===\n");
+
+    print_divider();
+    log_success("Test Scenario 2 finished");
 }
 
-// Interactive mode
+// ------------------------- Interactive -------------------------
 void interactive_mode(int sockfd) {
-    printf("\n=== Interactive Mode ===\n");
-    printf("Available commands:\n");
-    printf("  SIGNUP <username> <password>\n");
-    printf("  LOGIN <username> <password>\n");
-    printf("  UPLOAD <filename>\n");
-    printf("  DOWNLOAD <filename>\n");
-    printf("  DELETE <filename>\n");
-    printf("  LIST\n");
-    printf("  QUIT\n");
-    printf("Type 'quit' to exit interactive mode\n\n");
-    
-    char buffer[BUFFER_SIZE];
-    
+    print_divider();
+    printf("%s=== Interactive Mode ===%s\n", CYAN, RESET);
+    printf("Commands: SIGNUP/LOGIN/UPLOAD/DOWNLOAD/DELETE/LIST/QUIT\n");
+    print_divider();
+
+    char in[512];
+
+    // Wait for initial AUTH prompt from server before user input
+    char *initial = recv_with_gather(sockfd, 2000);
+    if (initial) { process_and_print_response(initial, &(char*){NULL}); free(initial); }
+
     while (1) {
-        printf("client> ");
+        printf("%sclient>%s ", GREEN, RESET);
         fflush(stdout);
-        
-        if (fgets(buffer, sizeof(buffer), stdin) == NULL) {
-            break;
+        if (!fgets(in, sizeof(in), stdin)) break;
+        in[strcspn(in, "\n")] = 0;
+        char *line = trim(in);
+        if (!line || !*line) continue;
+        if (strcasecmp(line, "quit") == 0 || strcasecmp(line, "exit") == 0) break;
+
+        // parse cmd
+        char copy[512]; strncpy(copy, line, sizeof(copy)); copy[sizeof(copy)-1]=0;
+        char *cmd = strtok(copy, " ");
+        if (!cmd) continue;
+
+        if (strcasecmp(cmd, "upload") == 0) {
+            char *fname = strtok(NULL, " ");
+            if (!fname) { log_error("Usage: UPLOAD <filename>"); continue; }
+
+            // open local file (support relative path, e.g., ../test.txt)
+            FILE *f = fopen(fname, "rb");
+            if (!f) { log_error("Cannot open file '%s'", fname); continue; }
+            fseek(f, 0, SEEK_END); long sz = ftell(f); rewind(f);
+            char *data = malloc((size_t)sz);
+            fread(data, 1, (size_t)sz, f); fclose(f);
+
+            char cmdline[256];
+            snprintf(cmdline, sizeof(cmdline), "UPLOAD %s\n", strrchr(fname, '/') ? strrchr(fname, '/')+1 : fname);
+            send(sockfd, cmdline, strlen(cmdline), 0);
+
+            // wait for READY or short ACK gather
+            char *r = recv_with_gather(sockfd, 1200);
+            if (r) { process_and_print_response(r, &(char*){NULL}); free(r); }
+            // send data
+            send(sockfd, data, (size_t)sz, 0);
+            free(data);
+
+            // wait for final result
+            r = recv_with_gather(sockfd, 2000);
+            char *payload = NULL;
+            if (r) { process_and_print_response(r, &payload); free(r); }
+            if (payload) { free(payload); }
+            continue;
         }
-        
-        // Remove newline
-        buffer[strcspn(buffer, "\n")] = 0;
-        
-        if (strcasecmp(buffer, "quit") == 0 || strcasecmp(buffer, "exit") == 0) {
-            break;
+
+        else if (strcasecmp(cmd, "download") == 0) {
+            char *fname = strtok(NULL, " ");
+            if (!fname) { log_error("Usage: DOWNLOAD <filename>"); continue; }
+            char cmdline[256];
+            snprintf(cmdline, sizeof(cmdline), "DOWNLOAD %s\n", fname);
+            send(sockfd, cmdline, strlen(cmdline), 0);
+
+            char *r = recv_with_gather(sockfd, 2000);
+            if (!r) { log_error("No response for DOWNLOAD"); continue; }
+
+            // If server included "TASK_COMPLETE: SUCCESS - <payload>" then save payload
+            char *payload = NULL;
+            int ok = process_and_print_response(r, &payload);
+            if (ok && payload) {
+                // save as downloaded_<fname>
+                char outname[512];
+                snprintf(outname, sizeof(outname), "downloaded_%s", fname);
+                FILE *out = fopen(outname, "wb");
+                if (out) {
+                    fwrite(payload, 1, strlen(payload), out);
+                    fclose(out);
+                    log_success("Saved downloaded file to %s", outname);
+                } else {
+                    log_error("Failed to save downloaded file");
+                }
+                free(payload);
+            }
+            free(r);
+            continue;
         }
-        
-        // Add newline back for server protocol
-        strcat(buffer, "\n");
-        
-        send_command(sockfd, buffer);
+
+        else if (strcasecmp(cmd, "delete") == 0) {
+            char *fname = strtok(NULL, " ");
+            if (!fname) { log_error("Usage: DELETE <filename>"); continue; }
+            char cmdline[256];
+            snprintf(cmdline, sizeof(cmdline), "DELETE %s\n", fname);
+            send(sockfd, cmdline, strlen(cmdline), 0);
+            char *r = recv_with_gather(sockfd, 1500);
+            if (r) { process_and_print_response(r, &(char*){NULL}); free(r); }
+            continue;
+        }
+
+        else {
+            // generic command (signup, login, list, quit)
+            char cmdline[512];
+            snprintf(cmdline, sizeof(cmdline), "%s\n", line);
+            send(sockfd, cmdline, strlen(cmdline), 0);
+            char *r = recv_with_gather(sockfd, 1500);
+            if (r) { process_and_print_response(r, &(char*){NULL}); free(r); }
+            continue;
+        }
     }
+
+    log_info("Exiting interactive mode");
 }
 
+// ------------------------- main -------------------------
 int main(int argc, char *argv[]) {
     if (argc < 3) {
-        printf("Usage: %s <server_ip> <port> [mode]\n", argv[0]);
-        printf("Example: %s 127.0.0.1 8080\n", argv[0]);
-        printf("Test modes: %s 127.0.0.1 8080 test1\n", argv[0]);
-        printf("           %s 127.0.0.1 8080 test2\n", argv[0]);
-        printf("           %s 127.0.0.1 8080 interactive\n", argv[0]);
+        fprintf(stderr, "Usage: %s <server_ip> <port> [mode]\n", argv[0]);
         return 1;
     }
-    
     const char *server_ip = argv[1];
     int port = atoi(argv[2]);
     const char *mode = (argc >= 4) ? argv[3] : "interactive";
-    
+
     int sockfd = connect_to_server(server_ip, port);
     if (sockfd < 0) {
+        log_error("Connection failed to server");
         return 1;
     }
-    
-    // Handle different test modes
+
     if (strcmp(mode, "test1") == 0) {
         test_scenario_1(sockfd);
     } else if (strcmp(mode, "test2") == 0) {
         close(sockfd);
         test_scenario_2();
-    } else if (strcmp(mode, "interactive") == 0) {
-        interactive_mode(sockfd);
     } else {
-        printf("Unknown mode: %s\n", mode);
-        printf("Use: test1, test2, or interactive\n");
+        interactive_mode(sockfd);
     }
-    
+
     close(sockfd);
-    printf("Disconnected from server\n");
-    
+    log_info("🔒 Disconnected from server");
     return 0;
 }
+

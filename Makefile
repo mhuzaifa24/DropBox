@@ -52,7 +52,16 @@ run-tsan: $(TARGET)
 	$(CC) $(CFLAGS) -fsanitize=thread -o $(TARGET)-tsan $(SRCS)
 	./$(TARGET)-tsan 8080
 
-.PHONY: all clean run-valgrind run-tsan
+.PHONY: valgrind-test test-client
 
+test-client:
+	python3 test/test_client.py
+
+valgrind-test: server
+	@echo "Starting server under valgrind -> valgrind-server.log"
+	@valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes \
+		--num-callers=20 --log-file=valgrind-server.log ./server 8080 & \
+	PID=$$!; sleep 0.5; python3 test/test_client.py; sleep 0.5; kill -INT $$PID || true; wait $$PID || true; \
+	echo "Valgrind test finished. Inspect valgrind-server.log"
 
 

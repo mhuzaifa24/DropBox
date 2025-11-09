@@ -70,52 +70,105 @@ int execute_task(task_t *task) {
     if (!task) {
         return ERROR;
     }
-    
+
     printf("Worker executing task: user=%s, operation=%d\n", task->username, task->operation);
-    
+
     // Get user for the task
     user_t *user = get_user(task->username);
     if (!user) {
         printf("User not found: %s\n", task->username);
+        set_task_result(task, AUTH_FAILED, "User not authenticated.\n", strlen("User not authenticated.\n") + 1);
+        send_task_result_to_client(task);
         return AUTH_FAILED;
     }
-    
+
     int result_code = SUCCESS;
-    char *result_data = NULL;
-    
-    // Execute the appropriate operation
+    char *response = NULL;
+
     switch (task->operation) {
-        case UPLOAD:
-            printf("UPLOAD operation for file: %s\n", task->filename);
-            result_data = "UPLOAD_SUCCESS: File uploaded";
+
+        case UPLOAD: {
+            printf("[WORKER] UPLOAD: %s\n", task->filename);
+            if (!task->file_data || task->data_size == 0) {
+                set_task_result(task, FILE_OP_ERROR, "Upload failed: no data.\n", strlen("Upload failed: no data.\n") + 1);
+            } else {
+                int res = handle_upload(user, task->filename, task->file_data, task->data_size);
+                if (res == FILE_OP_SUCCESS)
+                    set_task_result(task, FILE_OP_SUCCESS, "Upload successful.\n", strlen("Upload successful.\n") + 1);
+                else
+                    set_task_result(task, FILE_OP_ERROR, "Upload failed.\n", strlen("Upload failed.\n") + 1);
+            }
             break;
-            
-        case DOWNLOAD:
-            printf("DOWNLOAD operation for file: %s\n", task->filename);
-            result_data = "DOWNLOAD_SUCCESS: File downloaded";
+        }
+
+        case DOWNLOAD: {
+            printf("[WORKER] DOWNLOAD: %s\n", task->filename);
+            char *data = NULL;
+            size_t size = 0;
+            int res = handle_download(user, task->filename, &data, &size);
+            if (res == FILE_OP_SUCCESS)
+                set_task_result(task, FILE_OP_SUCCESS, data, size);
+            else
+                set_task_result(task, FILE_OP_ERROR, "Download failed.\n", strlen("Download failed.\n") + 1);
+            free(data);
             break;
-            
-        case DELETE:
-            printf("DELETE operation for file: %s\n", task->filename);
-            result_data = "DELETE_SUCCESS: File deleted";
+        }
+
+        case DELETE: {
+            printf("[WORKER] DELETE: %s\n", task->filename);
+            int res = handle_delete(user, task->filename);
+            if (res == FILE_OP_SUCCESS)
+                set_task_result(task, FILE_OP_SUCCESS, "Delete successful.\n", strlen("Delete successful.\n") + 1);
+            else if (res == FILE_OP_NOT_FOUND)
+                set_task_result(task, FILE_OP_NOT_FOUND, "Delete failed: file not found.\n", strlen("Delete failed: file not found.\n") + 1);
+            else
+                set_task_result(task, FILE_OP_ERROR, "Delete failed: error occurred.\n", strlen("Delete failed: error occurred.\n") + 1);
             break;
-            
-        case LIST:
-            printf("LIST operation\n");
-            result_data = "LIST_SUCCESS: Files listed";
+        }
+
+        case LIST: {
+            printf("[WORKER] LIST for user: %s\n", task->username);
+            int file_count = 0;
+            char **files = handle_list(user, &file_count);
+
+            if (files && file_count > 0) {
+                // Build result string
+                size_t buffer_size = 0;
+                for (int i = 0; i < file_count; i++)
+                    buffer_size += strlen(files[i]) + 2; // + newline
+
+                buffer_size += 32;
+                char *list_result = malloc(buffer_size);
+                if (!list_result) {
+                    set_task_result(task, FILE_OP_ERROR, "Memory allocation failed.\n", strlen("Memory allocation failed.\n") + 1);
+                    break;
+                }
+
+                strcpy(list_result, "Files:\n");
+                for (int i = 0; i < file_count; i++) {
+                    strcat(list_result, files[i]);
+                    strcat(list_result, "\n");
+                    free(files[i]); // free individual filename
+                }
+                free(files);
+
+                set_task_result(task, FILE_OP_SUCCESS, list_result, strlen(list_result) + 1);
+                free(list_result);
+            } else {
+                set_task_result(task, FILE_OP_SUCCESS, "No files found.\n", strlen("No files found.\n") + 1);
+            }
             break;
-            
+        }
+
         default:
-            result_code = ERROR;
-            result_data = "ERROR: Unknown operation";
+            set_task_result(task, ERROR, "Unknown operation.\n", strlen("Unknown operation.\n") + 1);
             break;
     }
-    
-    // Set task result
-    set_task_result(task, result_code, result_data, 0);
-    
+
+    send_task_result_to_client(task);
     return result_code;
 }
+
 
 void send_task_result_to_client(task_t *task) {
     if (!task || task->client_socket < 0) {
@@ -168,3 +221,4 @@ void* worker_thread_handler(void *arg) {
     printf("Worker thread exiting\n");
     return NULL;
 }
+

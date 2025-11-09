@@ -126,25 +126,68 @@ int delete_file_from_disk(const char *username, const char *filename) {
     if (!username || !filename) {
         return FILE_OP_ERROR;
     }
-    
-    // Create full file path
+
     char file_path[MAX_FILE_PATH];
     snprintf(file_path, sizeof(file_path), "%s/%s/%s", STORAGE_BASE_DIR, username, filename);
-    
+
     // Check if file exists
-    if (access(file_path, F_OK) != 0) {
+    struct stat st;
+    if (stat(file_path, &st) != 0) {
+        perror("File not found for deletion");
         return FILE_OP_NOT_FOUND;
     }
-    
-    // Delete file
+
+    if (remove(file_path) != 0) {
+        perror("Failed to delete file from disk");
+        return FILE_OP_ERROR;
+    }
+
+    printf("File deleted from disk: %s\n", file_path);
+    return FILE_OP_SUCCESS;
+}
+
+
+
+
+int handle_delete(user_t *user, const char *filename) {
+    if (!user || !filename) {
+        return FILE_OP_ERROR;
+    }
+
+    printf("Processing DELETE (disk mode): user=%s, file=%s\n", user->username, filename);
+
+    // Build file path
+    char file_path[MAX_FILE_PATH];
+    snprintf(file_path, sizeof(file_path), "%s/%s/%s", STORAGE_BASE_DIR, user->username, filename);
+
+    // Check if file exists
+    struct stat st;
+    if (stat(file_path, &st) != 0) {
+        perror("File not found for deletion");
+        return FILE_OP_NOT_FOUND;
+    }
+
+    size_t file_size = st.st_size;
+
+    // Attempt deletion
     if (remove(file_path) != 0) {
         perror("Failed to delete file");
         return FILE_OP_ERROR;
     }
-    
-    printf("Deleted file: %s\n", file_path);
+
+    printf("Deleted file from disk: %s\n", file_path);
+
+    // Optional: update quota if implemented
+    if (user->quota_used >= file_size) {
+        update_quota(user, -((ssize_t)file_size));
+    }
+
+    // Optional: remove from in-memory list (won’t hurt if absent)
+    user_remove_file(user, filename);
+
     return FILE_OP_SUCCESS;
 }
+
 
 int handle_upload(user_t *user, const char *filename, const char *data, size_t size) {
     if (!user || !filename || !data || size == 0) {
@@ -211,65 +254,41 @@ int handle_download(user_t *user, const char *filename, char **data, size_t *siz
     return result;
 }
 
-int handle_delete(user_t *user, const char *filename) {
-    if (!user || !filename) {
-        return FILE_OP_ERROR;
-    }
-    
-    printf("Processing DELETE: user=%s, file=%s\n", user->username, filename);
-    
-    // Check if user has the file
-    if (!user_has_file(user, filename)) {
-        return FILE_OP_NOT_FOUND;
-    }
-    
-    // Get file size for quota adjustment
-    size_t file_size = 0;
-    char file_path[MAX_FILE_PATH];
-    snprintf(file_path, sizeof(file_path), "%s/%s/%s", STORAGE_BASE_DIR, user->username, filename);
-    
-    struct stat st;
-    if (stat(file_path, &st) == 0) {
-        file_size = st.st_size;
-    }
-    
-    // Delete file from disk
-    if (delete_file_from_disk(user->username, filename) != FILE_OP_SUCCESS) {
-        return FILE_OP_ERROR;
-    }
-    
-    // Remove file from user's list and update quota
-    if (user_remove_file(user, filename) != SUCCESS) {
-        return FILE_OP_ERROR;
-    }
-    
-    // Update quota (reduce used quota)
-    if (file_size > 0) {
-        update_quota(user, -((ssize_t)file_size));
-    }
-    
-    printf("Delete successful: %s\n", filename);
-    return FILE_OP_SUCCESS;
-}
 
 char** handle_list(user_t *user, int *file_count) {
-    if (!user || !file_count) {
+    if (!user || !file_count) return NULL;
+
+    printf("Processing LIST (disk scan): user=%s\n", user->username);
+    *file_count = 0;
+
+    char user_dir[MAX_FILE_PATH];
+    snprintf(user_dir, sizeof(user_dir), "%s/%s", STORAGE_BASE_DIR, user->username);
+
+    DIR *dir = opendir(user_dir);
+    if (!dir) {
+        perror("Failed to open user directory");
         return NULL;
     }
-    
-    printf("Processing LIST: user=%s\n", user->username);
-    
-    // Get files from user's file list
-    char **files = user_list_files(user, file_count);
-    
-    if (files && *file_count > 0) {
-        printf("List successful: found %d files\n", *file_count);
-        for (int i = 0; i < *file_count; i++) {
-            printf("  %d. %s\n", i + 1, files[i]);
+
+    char **files = NULL;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_type == DT_REG) {  // regular file
+            files = realloc(files, sizeof(char*) * (*file_count + 1));
+            files[*file_count] = strdup(entry->d_name);
+            (*file_count)++;
         }
-    } else {
-        printf("No files found for user %s\n", user->username);
     }
-    
+    closedir(dir);
+
+    if (*file_count == 0) {
+        printf("No files found for user %s\n", user->username);
+        free(files);
+        return NULL;
+    }
+
+    printf("List successful: found %d files\n", *file_count);
     return files;
 }
+
+

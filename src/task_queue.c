@@ -119,9 +119,10 @@ int enqueue_task(task_queue_t *queue, const task_t *task) {
         pthread_cond_wait(&queue->not_full, &queue->lock);
     }
     
-    // Use deep copy instead of shallow copy
-    queue->tasks[queue->rear] = copy_task(task);
+ 
     queue->rear = (queue->rear + 1) % queue->capacity;
+    queue->tasks[queue->rear] = copy_task(task);
+
     queue->size++;
     
     // Signal that queue is not empty
