@@ -31,8 +31,21 @@ Abdullah Asim    - BSCS 23064<br>
       
 
 <br>5=For interactive Testing  with live commands:  <br>
-      ./test_client 127.0.0.1 8080 interactive   
+      ./test_client 127.0.0.1 8080 interactive  <br>
+
       
+<br>
+
+## Testing
+
+<br> Valgrind Test Command:<br>
+<img width="404" height="33" alt="val 1" src="https://github.com/user-attachments/assets/fcb4ebbd-93de-4751-a3af-a38e0bcdcbbc" />
+
+<br>Valgrind Result :<br>
+<img width="397" height="124" alt="val 2" src="https://github.com/user-attachments/assets/19898c3c-79e5-405d-ab8d-67f30be355ec" />
+
+
+
 
 
 
